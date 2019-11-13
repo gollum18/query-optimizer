@@ -3,15 +3,27 @@
     "tables": {
       "t1": {
         "num_pages": 1000,
-        "tuple_size": 20
+        "tuple_size": 20,
+        "indexed": false,
+        "index_type": null,
+        "clustered": false,
+        "sorted": false
       },
       "t2": {
         "num_pages": 500,
-        "tuple_size": 40
+        "tuple_size": 40,
+        "indexed": false,
+        "index_type": null,
+        "clustered": false,
+        "sorted": false
       },
       "t3": {
         "num_pages": 2000,
-        "tuple_size": 100
+        "tuple_size": 100,
+        "indexed": false,
+        "index_type": null,
+        "clustered": false,
+        "sorted": false
       }
     },
     "selectivity": {
