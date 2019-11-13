@@ -42,7 +42,7 @@ def permute(items):
             _items (list): A list of items to permute.
             _k (int): The permutation index used to control Heaps' algorithm.
         """
-        if k == 1:
+        if _k == 1:
             yield _items
         else:
             for i in range(_k):
@@ -115,42 +115,90 @@ class QueryOptimizer(object):
     format specific to the design of this project.
     """
 
-    def __init__(self):
-        raise NotImplementedError
+    def __init__(self, page_size=4096, block_size=100):
+        """Returns a new instance of a QueryOptimizer.
+
+        Arguments:
+            page_size (int): The maximum page size in bytes, i.e. the number
+            total amount of memory per page for holding a continguous
+            collection of tuples.
+            block_size (int): The maximum amount of pages that can be read into
+            a single block of memory, i.e. the buffer size.
+        """
+        self.page_size = page_size
+        self.block_size = block_size
+        self.join_functions = {
+            "TNL": (self.calc_tuple_nested_join_cost, None),
+            "PNL": (self.calc_page_nested_join_cost, None),
+            "BNJM": (self.calc_block_nested_join_cost, [50]),
+            "BNJL": (self.calc_block_nested_join_cost, [30]),
+            "SMJM": (self.calc_sort_merge_join_cost, [50]),
+            "SMJL": (self.calc_sort_merge_join_cost, [30]),
+            "HJM": (self.calc_hash_join_cost, None)
+        }
 
 
-    def calc_selection_cost(self, tables, selectivity, table):
+    def calc_selection_cost(self, tables, table):
         """Calculates the I/O cost for applying a selection operation.
 
         Arguments:
             tables (dict): A dictionary containing statistics on the tables to
             select (filter) from.
-            selectivity (dict): A dictionary containing the selectivity rates
-            of various predicates between the tables
             table (str): The name of the table to select.
 
         Returns:
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not table:
+            print('Selection cost operation received bad argument, cannot continue!')
+            sys.exit(-1)
+        if table not in tables:
+            print('Selection table not found, cannot continue!')
+            sys.exit(-1)
+        indexed, sorted = None, None
+        try:
+            indexed, sorted = tables[table]['indexed'], tables[table]['sorted']
+        except KeyError:
+            print('Unable to determine if table is indexed and sorted, cannot continue!')
+            sys.exit(-1)
+        if indexed:
+            raise NotImplementedError
+        elif not indexed and sorted:
+            return int(math.ceil(math.log2(tables[table]['num_pages'])))
+        else:
+            return tables[table]['num_pages']
 
 
-    def calc_projection_cost(self, tables, projectivity, table):
+    def calc_projection_cost(self, tables, table):
         """Calculates the I/O cost for applying a projection operation.
 
         Arguments:
             tables (dict): A dictionary containing statistics on the tables to
             project from.
-            projectivity (float): The average percentage of records that will
-            be projected via the projection operator.
             table (str): The name of the table to project.
 
         Returns:
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not table:
+            print('Projection cost operation received bad argument, cannot continue!')
+            sys.exit(-1)
+        if table not in tables:
+            print('Selection table not found, cannot continue!')
+            sys.exit(-1)
+        indexed, sorted = None, None
+        try:
+            indexed, sorted = tables[table]['indexed'], tables[table]['sorted']
+        except KeyError:
+            print('Unable to determine if table is indexed and sorted, cannot continue!')
+            sys.exit(-1)
+        num_pages = tables[table]['num_pages']
+        if sorted:
+            return num_pages
+        else:
+            return num_pages * int(math.ceil(math.log2(num_pages)))
 
 
     def calc_tuple_nested_join_cost(self, tables, outer_table, inner_table):
@@ -166,7 +214,26 @@ class QueryOptimizer(object):
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not outer_table or not inner_table:
+            print('Tuple nested join operation received bad arguments, cannot continue!')
+            sys.exit(-1)
+        if outer_table not in tables:
+            print('Outer table not found, cannot continue!')
+            sys.exit(-1)
+        if inner_table not in tables:
+            print('Inner table not found, cannot continue!')
+            sys.exit(-1)
+        outer_table_pages = tables[outer_table]['num_pages']
+        inner_table_pages = tables[inner_table]['num_pages']
+        outer_tuples_per_page = QueryOptimizer.tuples_per_page(
+            self.page_size,
+            outer_table_pages
+        )
+        return (
+            outer_table_pages +
+            (outer_tuples_per_page * outer_table_pages) *
+            inner_table_pages
+        )
 
 
     def calc_page_nested_join_cost(self, tables, outer_table, inner_table):
@@ -182,10 +249,21 @@ class QueryOptimizer(object):
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not outer_table or not inner_table:
+            print('Tuple nested join operation received bad arguments, cannot continue!')
+            sys.exit(-1)
+        if outer_table not in tables:
+            print('Outer table not found, cannot continue!')
+            sys.exit(-1)
+        if inner_table not in tables:
+            print('Inner table not found, cannot continue!')
+            sys.exit(-1)
+        outer_table_pages = tables[outer_table]['num_pages']
+        inner_table_pages = tables[inner_table]['num_pages']
+        return outer_table_pages + outer_table_pages * inner_table_pages
 
 
-    def calc_block_nested_join_cost(self, tables, outer_table, inner_table):
+    def calc_block_nested_join_cost(self, tables, outer_table, inner_table, block_size):
         """Calculates the I/O cost for applying a block nested join operation.
 
         Arguments:
@@ -193,15 +271,37 @@ class QueryOptimizer(object):
             join.
             outer_table (str): The name of the outer table.
             inner_table (str): The name of the inner table.
+            block_size (int): The number of blocks to store in the buffer at
+            once.
 
         Returns:
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not outer_table or not inner_table or not block_size:
+            print('Block nested join operation received bad arguments, cannot continue!')
+            sys.exit(-1)
+        if outer_table not in tables:
+            print('Outer table not found, cannot continue!')
+            sys.exit(-1)
+        if inner_table not in tables:
+            print('Inner table not found, cannot continue!')
+            sys.exit(-1)
+        if block_size <= 0:
+            print('Block size invalid, cannot continue!')
+            sys.exit(-1)
+        outer_table_pages = tables[outer_table]['num_pages']
+        inner_table_pages = tables[inner_table]['num_pages']
+        outer_blocks = int(math.ceil(outer_table_pages / block_size))
+        return (
+            outer_table_pages +
+            outer_blocks *
+            inner_table_pages
+        )
 
 
-    def calc_sort_merge_join_cost(self, tables, left_table, right_table):
+    def calc_sort_merge_join_cost(self, tables, left_table, right_table,
+        block_size):
         """Calculates the I/O cost for applying a sort merge join operation.
 
         Arguments:
@@ -209,11 +309,36 @@ class QueryOptimizer(object):
             join.
             left_table (str): The name of the left table.
             right_table (str): The name of the right table.
+            block_size (int): The number of blocks to store in the buffer at
+            once.
 
         Returns:
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
+        if not tables or not left_table or not right_table or not block_size:
+            print('Sort merge join operation received bad arguments, cannot continue!')
+            sys.exit(-1)
+        if left_table not in tables:
+            print('Left table not found, cannot continue!')
+            sys.exit(-1)
+        if right_table not in tables:
+            print('Right table not found, cannot continue!')
+            sys.exit(-1)
+        if block_size <= 0:
+            print('Block size cannot be <= 0, cannot continue!')
+            sys.exit(-1)
+        # TODO: Handle indexing and clustering cases
+        left_table_pages = tables[left_table]['num_pages']
+        right_table_pages = tables[right_table]['num_pages']
+        if block_size > math.sqrt(max(left_table_pages, right_table_pages)):
+            return 3 * (left_table_pages + right_table_pages)
+        else:
+            return (
+                (left_table_pages * int(math.ceil(math.log(left_table_pages, block_size-1)))) +
+                (right_table_pages * int(math.ceil(math.log(right_table_pages, block_size-1)))) +
+                (left_table_pages + right_table_pages)
+            )
         raise NotImplementedError
 
 
@@ -230,7 +355,19 @@ class QueryOptimizer(object):
             (int): The number of estimated I/O operations needed to fully apply
             the operation.
         """
-        raise NotImplementedError
+        if not tables or not left_table or not right_table:
+            print('Hash join operation received bad arguments, cannot continue!')
+            sys.exit(-1)
+        if left_table not in tables:
+            print('Left table not found, cannot continue!')
+            sys.exit(-1)
+        if right_table not in tables:
+            print('Right table not found, cannot continue!')
+            sys.exit(-1)
+        # TODO: Handle indexing and clustering cases
+        left_table_pages = tables[left_table]['num_pages']
+        right_table_pages = tables[right_table]['num_pages']
+        return 3 * (left_table_pages + right_table_pages)
 
 
     def generate_exec_plan(self, query_file):
@@ -244,8 +381,20 @@ class QueryOptimizer(object):
             (QueryPlan): A QueryPlan object.
         """
         qdict = read_query_file(query_file)
-
-        raise NotImplementedError
+        stats = qdict['statistics']
+        tables = stats['tables']
+        projectivity = stats['projectivity']
+        tnames = list(tables.keys())
+        print(tnames)
+        for key, value in self.join_functions.items():
+            func = value[0]
+            args = value[1]
+            for p in permute(tnames):
+                if args:
+                    cost = func(tables, tnames[0], tnames[1], *args)
+                else:
+                    cost = func(tables, tnames[0], tnames[1])
+                print(key, cost)
 
 
     @staticmethod
@@ -256,7 +405,8 @@ class QueryOptimizer(object):
 
 
 def main():
-    raise NotImplementedError
+    qo = QueryOptimizer()
+    qo.generate_exec_plan('./q1.json')
 
 
 if __name__ == '__main__':
