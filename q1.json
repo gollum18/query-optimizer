@@ -1,0 +1,29 @@
+{
+  "statistics": {
+    "tables": {
+      "t1": {
+        "num_pages": 1000,
+        "tuple_size": 20
+      },
+      "t2": {
+        "num_pages": 500,
+        "tuple_size": 40
+      },
+      "t3": {
+        "num_pages": 2000,
+        "tuple_size": 100
+      }
+    },
+    "selectivity": {
+      "default": 0.15,
+      "t2.x2=t3.x3": 0.10,
+      "t3.x3=t2.x2": 0.10,
+      "t1.x1=t3.x3": 0.20,
+      "t3.x3=t1.x1": 0.20
+    },
+    "projectivity": 0.70
+  },
+  "steps": {
+
+  }
+}
