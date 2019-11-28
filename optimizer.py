@@ -16,10 +16,78 @@ Assumptions:
     query. This contains all of the necessary statistical information to
     compute the cost of executing a query and additionally contains the query
     itself.
+    4.) Assume that each query file contains information on whether the tables
+    involved in the query are indexed, clustered, and sorted.
+
+TODO:
+    1.) All of the join methods need to also consider cases where indexing,
+    sorting, and clustering are in effect.
 """
 
 import math, os, sys
 import simplejson as json
+
+index_type_key = 'index_type'
+clustered_key = 'clustered'
+indexed_key = 'indexed'
+sorted_key = 'sorted'
+
+
+def cost_to_timestamp(cost, avg_seek_time=8, avg_latency=4):
+    """Converts an I/O cost metric to a timestamp containing three elements:
+    hours, minutes, seconds.
+
+    Arguments:
+        cost (int): The I/O cost to convert to a timestamp.
+        avg_seek_time (int): The average seek time of the disk in milliseconds.
+        avg_latency (int): The average latency of the disk in milliseconds.
+    """
+    if not cost or not avg_seek_time or not avg_latency:
+        raise ValueError
+    if cost == 0:
+        return 0, 0, 0
+    seconds = int(
+        cost * (
+            (avg_seek_time/1000) + (avg_latency/1000)
+        )
+    )
+    minutes, hours = 0, 0
+    while seconds >= 60:
+        seconds -= 60
+        minutes += 1
+        if minutes == 60:
+            hours += 1
+            minutes = 0
+    return hours, minutes, seconds
+
+
+def create_table(name, num_pages, tuple_size, indexed=False, index_type=None, ikey_type=None, clustered=False, sorted=False):
+    """
+    Creates a table for use by the query optimizer. A table is just a nested dictionary object.
+
+    Arguments:
+        name (str): The name of the table n.
+        num_pages (int): The number of records in the table p | p > 0 ^ p < inf.
+        tuple_size (int): The size of a single tuple in the table u | u > 0 ^ u < inf.
+        indexed (boolean): Whether the data in the table is indexed or not d | d E {True, False}.
+        index_type (str): The index type of the table t | t E {null, bpt_index, hash_index}.
+        ikey_type (str): The key type of the index i | i E {null, primary, secondary, composite}.
+        clustered (boolean): Whether the index is clustered or not c | c E {True, False}.
+        sorted (boolean): Whether the table is sorted or not s | s E {True, False}.
+
+    Returns:
+        A (key, dict) pair.
+    """
+    return (name, {
+        'num_pages': num_pages,
+        'tuple_size': tuple_size,
+        'indexed': indexed,
+        'index_type': index_type,
+        'ikey_type': ikey_type,
+        'clustered': clustered,
+        'sorted': sorted
+    })
+
 
 def permute(items):
     """Permutes a list of items.
@@ -33,7 +101,7 @@ def permute(items):
     """
 
     def _permute(_items, _k):
-        """Internal permutation method that implemented Heaps' algorithm for
+        """Internal permutation method that implements Heaps' algorithm for
         efficiently generating permutations. Permutations are performed in
         place and yielded as such. Yielded lists should not be modified and
         should be treated as read-only.
@@ -72,7 +140,6 @@ def read_query_file(query_file):
     try:
         if not os.path.exists(query_file):
             raise OSError
-        qdict = None
         with open(query_file) as f:
             qdict = json.load(f)
         if not isinstance(qdict, dict):
@@ -93,13 +160,12 @@ class QueryPlan(object):
         """Returns a new instace of a query plan.
 
         Arguments:
-            query_name (str):
-            has_subquery (boolean):
-            is_correlated (boolean):
-            join_method (str):
-            join_order ():
-            total_cost (int):
-            query_plan ():
+            query_name (str): The name of the query.
+            has_subquery (boolean): Whether the query has a subquery or not.
+            is_correlated (boolean): Whether the sub-query is correlated or not.
+            join_method (str): The join method used in the query.
+            join_order (list): A list containing the ordering of join operations to run.
+            total_cost (int): The total cost of running the query plan.
         """
         self.query_name = query_name
         self.has_subquery = has_subquery
@@ -108,6 +174,11 @@ class QueryPlan(object):
         self.join_order = join_order
         self.total_cost = total_cost
         self.query_plan = query_plan
+
+    def __str__(self):
+        return 'Query: {}\n\tHas Subquery: {}\n\tHas Correlation: {}\n\tJoin Method: {}\n\tJoin Order: {}\n\tTotal Cost: {}'.format(
+            self.query_name, self.has_subquery, self.is_correlated, self.join_method, self.join_order, self.total_cost
+        )
 
 
 class QueryOptimizer(object):
@@ -127,16 +198,64 @@ class QueryOptimizer(object):
         """
         self.page_size = page_size
         self.block_size = block_size
-        self.join_functions = {
-            "TNL": (self.calc_tuple_nested_join_cost, None),
-            "PNL": (self.calc_page_nested_join_cost, None),
-            "BNJM": (self.calc_block_nested_join_cost, [50]),
-            "BNJL": (self.calc_block_nested_join_cost, [30]),
-            "SMJM": (self.calc_sort_merge_join_cost, [50]),
-            "SMJL": (self.calc_sort_merge_join_cost, [30]),
-            "HJM": (self.calc_hash_join_cost, None)
-        }
+        self.join_functions = dict()
+        self._table_counter = 1
 
+    def add_join_scenario(self, key, join_function, args):
+        """
+        Adds a join scenario to the optimizer.
+        :param key: The key for the join scenario -> uniquely identifies scenario.
+        :param join_function: The join calculation function to call.
+        :param args: A list of arguments to pass to join_function.
+        """
+        self.join_functions[key] = (join_function, args)
+
+    def clear_join_scenarios(self):
+        """
+        Removes all join scenarios from the optimizer.
+        """
+        self.join_functions.clear()
+
+    def delete_join_scenario(self, key):
+        """
+        Removes a join scenario from the optimizer.
+        :param key: The key of the join scenario to remove.
+        """
+        if key in self.join_functions:
+            del self.join_functions[key]
+
+    def calc_aggregation_cost(self, tables, table, groupby=True):
+        """ Calculates the cost of performing an aggregation in terms of Disk I/O.
+
+        Arguments:
+            tables (dict): A dictionary containing statistics on the tables to aggregate.
+            table (str): The table to aggregate.
+            groupby (boolean): Whether to perform a groupby or not.
+
+        Returns:
+             (int): The number of estimated I/O operations to fully apply the aggregation
+             operator on the indicated table.
+        """
+        if not tables or not table:
+            print('Aggregation operation received bad argument, cannot continue!')
+            sys.exit(-1)
+        if table not in tables:
+            print('Aggregation table not found, cannot continue!')
+            sys.exit(-1)
+        try:
+            sorted = tables[table]['sorted']
+        except KeyError:
+            print('Unable to determine if table is sorted, cannot continue!')
+            sys.exit(-1)
+        # if the prior step is a join with sort-merge, then there is no need to factor in sorting
+        num_pages = tables[table]['num_pages']
+        if sorted:
+            return num_pages
+        else:
+            if groupby:
+                return (num_pages * math.log(num_pages, 2)) + num_pages
+            else:
+                return num_pages
 
     def calc_selection_cost(self, tables, table):
         """Calculates the I/O cost for applying a selection operation.
@@ -160,7 +279,7 @@ class QueryOptimizer(object):
         try:
             indexed, sorted = tables[table]['indexed'], tables[table]['sorted']
         except KeyError:
-            print('Unable to determine if table is indexed and sorted, cannot continue!')
+            print('Unable to determine if table is indexed or sorted, cannot continue!')
             sys.exit(-1)
         if indexed:
             raise NotImplementedError
@@ -168,7 +287,6 @@ class QueryOptimizer(object):
             return int(math.ceil(math.log2(tables[table]['num_pages'])))
         else:
             return tables[table]['num_pages']
-
 
     def calc_projection_cost(self, tables, table):
         """Calculates the I/O cost for applying a projection operation.
@@ -186,7 +304,7 @@ class QueryOptimizer(object):
             print('Projection cost operation received bad argument, cannot continue!')
             sys.exit(-1)
         if table not in tables:
-            print('Selection table not found, cannot continue!')
+            print('Projection table not found, cannot continue!')
             sys.exit(-1)
         indexed, sorted = None, None
         try:
@@ -199,7 +317,6 @@ class QueryOptimizer(object):
             return num_pages
         else:
             return num_pages * int(math.ceil(math.log2(num_pages)))
-
 
     def calc_tuple_nested_join_cost(self, tables, outer_table, inner_table):
         """Calculates the I/O cost for applying a tuple nested join operation.
@@ -235,7 +352,6 @@ class QueryOptimizer(object):
             inner_table_pages
         )
 
-
     def calc_page_nested_join_cost(self, tables, outer_table, inner_table):
         """Calculates the I/O cost for applying a page nested join operation.
 
@@ -261,7 +377,6 @@ class QueryOptimizer(object):
         outer_table_pages = tables[outer_table]['num_pages']
         inner_table_pages = tables[inner_table]['num_pages']
         return outer_table_pages + outer_table_pages * inner_table_pages
-
 
     def calc_block_nested_join_cost(self, tables, outer_table, inner_table, block_size):
         """Calculates the I/O cost for applying a block nested join operation.
@@ -299,9 +414,8 @@ class QueryOptimizer(object):
             inner_table_pages
         )
 
-
     def calc_sort_merge_join_cost(self, tables, left_table, right_table,
-        block_size):
+            block_size):
         """Calculates the I/O cost for applying a sort merge join operation.
 
         Arguments:
@@ -334,15 +448,16 @@ class QueryOptimizer(object):
         if block_size > math.sqrt(max(left_table_pages, right_table_pages)):
             return 3 * (left_table_pages + right_table_pages)
         else:
-            return (
-                (left_table_pages * int(math.ceil(math.log(left_table_pages, block_size-1)))) +
-                (right_table_pages * int(math.ceil(math.log(right_table_pages, block_size-1)))) +
-                (left_table_pages + right_table_pages)
-            )
-        raise NotImplementedError
+            if sorted_key in tables[left_table] and sorted_key in tables[right_table]:
+                if tables[left_table][sorted_key] and tables[right_table][sorted_key]:
+                    return 2 * (left_table_pages, right_table_pages)
+        big_table = max(left_table_pages, right_table_pages)
+        little_table = min(left_table_pages, right_table_pages)
+        return 2 * (big_table + little_table) * (1 + int(math.ceil(
+            math.log(big_table / block_size, block_size - 1)
+        )))
 
-
-    def calc_hash_join_cost(self, tables, left_table, right_table):
+    def calc_hash_join_cost(self, tables, left_table, right_table, block_size):
         """Calculates the I/O cost for applying a hash join operation.
 
         Arguments:
@@ -367,34 +482,278 @@ class QueryOptimizer(object):
         # TODO: Handle indexing and clustering cases
         left_table_pages = tables[left_table]['num_pages']
         right_table_pages = tables[right_table]['num_pages']
-        return 3 * (left_table_pages + right_table_pages)
+        return 2 * (left_table_pages + right_table_pages) * (1 + int(math.ceil(
+            math.log(left_table_pages/(block_size-1))
+        )))
 
+    def _generate_table_name(self, id=None):
+        """Generates a table name for a temporary table.
 
-    def generate_exec_plan(self, query_file):
+        Arguments:
+            id (int): The id to use for the table.
+
+        Returns:
+             (str): A unique table name for a temporary table.
+        """
+        if id and not isinstance(id, int):
+            raise ValueError
+
+        if id:
+            tname = 'temp{}'.format(id)
+        else:
+            tname = 'temp{}'.format(self._table_counter)
+            self._table_counter += 1
+        return tname
+
+    def _handle_select(self, key, stats, query):
+        """Handles a select operation for the query optimizer.
+
+        Arguments:
+            stats (dict): A dictionary containing statistics on tables.
+            query (dict): A dictionary containing query steps.
+
+        Returns:
+            (int): An estimated cost for I/O.
+        """
+        if not (key == 'select'):
+            raise KeyError
+        return self.calc_selection_cost(stats['tables'], query[key])
+
+    def _handle_project(self, key, stats, query):
+        """Handles a project operation for the query optimzer.
+
+        Arguments:
+            stats (dict): A dictionary containing statistics on tables.
+            query (dict): A dictionary containing query steps.
+
+        Returns:
+            (int): An estimated cost for I/O.
+        """
+        if not (key == 'project'):
+            raise KeyError
+        return self.calc_projection_cost(stats['tables'], query[key])
+
+    def _handle_join(self, key, stats, query):
+        """Handles a join operation for the query optimizer.
+
+        Arguments:
+            stats (dict): A dictionary containing statistics on tables.
+            query (dict): A dictionary containing query steps.
+
+        Returns:
+        """
+        if not (key == 'join'):
+            raise KeyError
+
+        best_join_order = None
+        best_join_method = None
+        best_join_func = None
+        best_join_cost = float('inf')
+
+        for order in permute(query[key]):
+            for method, params in self.join_functions.items():
+                join_func = params[0]
+                join_args = params[1]
+                if join_args:
+                    cost = join_func(stats['tables'], order[0], order[1], *join_args)
+                else:
+                    cost = join_func(stats['tables'], order[0], order[1])
+                if cost < best_join_cost:
+                    best_join_order = order
+                    best_join_method = method
+                    best_join_func = join_func
+                    best_join_cost = cost
+
+        tname = self._generate_table_name()
+        join_table = create_table(
+            name=tname,
+            num_pages=(
+                int(
+                    math.ceil(
+                        min(
+                            stats['tables'][best_join_order[0]]['num_pages'],
+                            stats['tables'][best_join_order[1]]['num_pages']
+                        ) * stats['projectivity']
+                    )
+                )
+            ),
+            tuple_size=(
+                stats['tables'][best_join_order[0]]['tuple_size'] +
+                stats['tables'][best_join_order[1]]['tuple_size']
+            ),
+            sorted=True if best_join_func == self.calc_sort_merge_join_cost else False
+        )
+        stats['tables'][join_table[0]] = join_table[1]
+
+        return {
+            'order': best_join_order,
+            'method': best_join_method,
+            'cost': best_join_cost
+        }
+
+    def _handle_correlate(self, key, stats, query):
+        """Handles a correlate operation for the query optimizer.
+
+        Arguments:
+            stats (dict): A dictionary containing statistics on tables.
+            query (dict): A dictionary containing query steps.
+
+        Returns:
+            (int): An estimated cost for I/O.
+        """
+        if not (key == 'correlate'):
+            raise KeyError
+        correlation = query[key]
+        total_cost = 0
+        join_order = None
+        for step in correlation['steps']:
+            if step == 'select':
+                pass
+            elif step == 'join':
+                best_cost = float('inf')
+                for order in permute(correlation[step]):
+                    cost = self.calc_tuple_nested_join_cost(stats['tables'], *order)
+                    if cost < best_cost:
+                        best_cost = cost
+                        join_order = order
+                tname = self._generate_table_name()
+                table = create_table(
+                    name=tname,
+                    num_pages=(
+                            int(
+                                math.ceil(
+                                    min(
+                                        stats['tables'][join_order[0]]['num_pages'],
+                                        stats['tables'][join_order[1]]['num_pages']
+                                    ) * stats['projectivity']
+                                )
+                            )
+                    ),
+                    tuple_size=(
+                        stats['tables'][join_order[0]]['tuple_size'] +
+                        stats['tables'][join_order[1]]['tuple_size']
+                    )
+                )
+                stats['tables'][table[0]] = table[1]
+                total_cost += best_cost
+            elif step == 'project':
+                total_cost += self.calc_projection_cost(stats['tables'], correlation[step])
+                tname = self._generate_table_name()
+                table = create_table(
+                    name=tname,
+                    num_pages=(
+                        stats['tables'][correlation[step]]['num_pages']
+                    ),
+                    tuple_size=(
+                        stats['tables'][correlation[step]]['tuple_size']
+                    )
+                )
+                stats['tables'][table[0]] = table[1]
+            elif step == 'aggr_no_groupby':
+                total_cost += self.calc_aggregation_cost(stats['tables'], correlation[step], False)
+            elif step == 'aggr_with_groupby':
+                total_cost += self.calc_aggregation_cost(stats['tables'], correlation[step], True)
+        return {'cost': total_cost, 'join_order': join_order}
+
+    def _handle_aggregate(self, key, stats, query, group_by):
+        """Handles an aggregate operation for the query optimizer.
+
+        Arguments:
+            stats (dict): A dictionary containing statistics on tables.
+            query (dict): A dictionary containing query steps.
+
+        Returns:
+            (int): An estimated cost for I/O.
+        """
+        if not (key == 'aggr_with_groupby' or not key == 'aggr_no_groupby'):
+            raise KeyError
+        return self.calc_aggregation_cost(
+            stats['tables'], query[key], group_by
+        )
+
+    def generate_query_plan(self, filename):
         """Determines the best possible execution plan for a query assuming
         the assumptions listed at the top of this file.
 
         Arguments:
-            (query_file): The path to a file containing a query.
+            filename (str): The path to a file containing a query.
 
         Returns:
             (QueryPlan): A QueryPlan object.
         """
-        qdict = read_query_file(query_file)
-        stats = qdict['statistics']
-        tables = stats['tables']
-        projectivity = stats['projectivity']
-        tnames = list(tables.keys())
-        print(tnames)
-        for key, value in self.join_functions.items():
-            func = value[0]
-            args = value[1]
-            for p in permute(tnames):
-                if args:
-                    cost = func(tables, tnames[0], tnames[1], *args)
+        self._table_counter = 1
+
+        from queue import Queue
+
+        try:
+            query_file = read_query_file(filename)
+            stats = query_file['statistics']
+            query = query_file['query']
+            query_steps = query['steps']
+
+            step_queue = Queue()
+            for qstep in query_steps:
+                frame_key = qstep
+                if qstep == 'select':
+                    frame_func = self._handle_select
+                    frame_args = [stats, query]
+                elif qstep == 'project':
+                    frame_func = self._handle_project
+                    frame_args = [stats, query]
+                elif qstep == 'join':
+                    frame_func = self._handle_join
+                    frame_args = [stats, query]
+                elif qstep == 'correlate':
+                    frame_func = self._handle_correlate
+                    frame_args = [stats, query]
+                elif qstep == 'aggr_no_groupby':
+                    frame_func = self._handle_aggregate
+                    frame_args = [stats, query, False]
+                elif qstep == 'aggr_with_groupby':
+                    frame_func = self._handle_aggregate
+                    frame_args = [stats, query, True]
                 else:
-                    cost = func(tables, tnames[0], tnames[1])
-                print(key, cost)
+                    print('Error: Key \'{}\' not supported, cannot continue...'.format(qstep))
+                    sys.exit(-1)
+                step_queue.put_nowait({
+                    'key': frame_key,
+                    'func': frame_func,
+                    'args': frame_args
+                })
+
+            best_join_order = None
+            best_join_method = None
+            corr_join_order = None
+            total_cost = 0
+            while not step_queue.empty():
+                frame = step_queue.get_nowait()
+                key = frame['key']
+                func = frame['func']
+                args = frame['args']
+                lvalue = func(key, *args)
+                if key == 'correlate':
+                    corr_join_order = lvalue['join_order']
+                    total_cost += lvalue['cost']
+                elif key == 'join':
+                    best_join_order = lvalue['order']
+                    best_join_method = lvalue['method']
+                    total_cost += lvalue['cost']
+                else:
+                    total_cost += lvalue
+
+            return QueryPlan(
+                query_name=filename.strip('.json'),
+                has_subquery=True if corr_join_order else False,
+                is_correlated=True if corr_join_order else False,
+                join_method=best_join_method,
+                join_order=best_join_order,
+                total_cost=total_cost,
+                query_plan=None
+            )
+
+        except KeyError as e:
+            print('KeyError: Query file is malformed, cannot continue. Key {} not found...'.format(e))
+            sys.exit(-1)
 
 
     @staticmethod
@@ -406,7 +765,20 @@ class QueryOptimizer(object):
 
 def main():
     qo = QueryOptimizer()
-    qo.generate_exec_plan('./q1.json')
+    join_scenarios = [
+        ["TNL", qo.calc_tuple_nested_join_cost, None],
+        ["PNL", qo.calc_page_nested_join_cost, None],
+        ["BNJM", qo.calc_block_nested_join_cost, [50]],
+        ["BNJL", qo.calc_block_nested_join_cost, [30]],
+        ["SMJM", qo.calc_sort_merge_join_cost, [50]],
+        ["SMJL", qo.calc_sort_merge_join_cost, [30]],
+        ["HJM", qo.calc_hash_join_cost, [50]],
+        ["HJL", qo.calc_hash_join_cost, [30]]
+    ]
+    for scenario in join_scenarios:
+        qo.add_join_scenario(*scenario)
+    print(qo.generate_query_plan('q1.json'))
+    print(qo.generate_query_plan('rq1.json'))
 
 
 if __name__ == '__main__':
