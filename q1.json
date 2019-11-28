@@ -6,6 +6,7 @@
         "tuple_size": 20,
         "indexed": false,
         "index_type": null,
+        "ikey_type": null,
         "clustered": false,
         "sorted": false
       },
@@ -14,6 +15,7 @@
         "tuple_size": 40,
         "indexed": false,
         "index_type": null,
+        "ikey_type": null,
         "clustered": false,
         "sorted": false
       },
@@ -22,6 +24,7 @@
         "tuple_size": 100,
         "indexed": false,
         "index_type": null,
+        "ikey_type": null,
         "clustered": false,
         "sorted": false
       }
@@ -29,13 +32,20 @@
     "selectivity": {
       "default": 0.15,
       "t2.x2=t3.x3": 0.10,
-      "t3.x3=t2.x2": 0.10,
-      "t1.x1=t3.x3": 0.20,
-      "t3.x3=t1.x1": 0.20
+      "t1.x1=t3.x3": 0.20
     },
     "projectivity": 0.70
   },
-  "steps": {
-
+  "query": {
+    "steps": ["join", "correlate", "aggr_with_groupby"],
+    "join": ["t1", "t2"],
+    "correlate": {
+      "steps": ["join", "project", "aggr_no_groupby"],
+      "selectivity": ["t1.x1=t3.x3", "t2.x2=t3.x3"],
+      "join": ["temp1", "t3"],
+      "project": "temp2",
+      "aggr_no_groupby": "t3"
+    },
+    "aggr_with_groupby": "t2"
   }
 }
