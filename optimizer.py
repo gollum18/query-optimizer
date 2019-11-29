@@ -622,6 +622,12 @@ class QueryOptimizer(object):
     def _handle_correlate(self, key, stats, query):
         """Handles a correlate operation for the query optimizer.
 
+        Note that EACH relational algebra step is performed PER tuple of
+        the outer correlation table. Prior implementations of this
+        algorithm only considered running join operations per tuple of the
+        outer table, which is incorrect. In a correlated query, each step
+        of the correlated subquery is performed per tuple of the outer table.
+
         Arguments:
             stats (dict): A dictionary containing statistics on tables.
             query (dict): A dictionary containing query steps.
@@ -633,26 +639,46 @@ class QueryOptimizer(object):
             raise KeyError
         correlation = query[key]
         total_cost = 0
-        join_order = None
+        join_order = correlation['join']
+        outer_table_pages = stats['tables'][join_order[0]]['num_pages']
         for step in correlation['steps']:
             if step == 'select':
-                pass
-            elif step == 'join':
-                best_cost = float('inf')
-                for order in permute(correlation[step]):
-                    cost = (
-                        stats['tables'][order[0]]['num_pages'] *
-                        self.calc_tuple_nested_join_cost(stats['tables'], *order)
+                total_cost += int(
+                    math.ceil(
+                        (
+                            outer_table_pages*
+                            self.calc_selection_cost(stats['tables'], correlation[step])
+                        )
                     )
-                    if cost < best_cost:
-                        best_cost = cost
-                        join_order = order
+                )
                 tname = self._generate_table_name()
                 table = create_table(
                     name=tname,
                     num_pages=(
-                            stats['tables'][join_order[0]]['num_pages'] *
-                            stats['tables'][join_order[1]]['num_pages']
+                        int(
+                            math.ceil(
+                                stats['tables'][step]['num_pages'] *
+                                stats['selectivity']['default']
+                            )
+                        )
+                    ),
+                    tuple_size=(
+                            stats['tables'][step]['tuple_size']
+                    )
+                )
+                stats['tables'][table[0]] = table[1]
+            elif step == 'join':
+                join_cost = (
+                    outer_table_pages *
+                    self.calc_tuple_nested_join_cost(stats['tables'], *join_order)
+                )
+                tname = self._generate_table_name()
+                table = create_table(
+                    name=tname,
+                    num_pages=(
+                        outer_table_pages *
+                        stats['tables'][join_order[0]]['num_pages'] *
+                        stats['tables'][join_order[1]]['num_pages']
                     ),
                     tuple_size=(
                         stats['tables'][join_order[0]]['tuple_size'] +
@@ -663,7 +689,7 @@ class QueryOptimizer(object):
                     table[1]['num_pages'] = table[1]['num_pages'] * stats['selectivity'][s]
                 table[1]['num_pages'] = int(math.ceil(table[1]['num_pages']))
                 stats['tables'][table[0]] = table[1]
-                total_cost += best_cost
+                total_cost += join_cost
             elif step == 'project':
                 total_cost += self.calc_projection_cost(stats['tables'], correlation[step])
                 tname = self._generate_table_name()
@@ -678,9 +704,19 @@ class QueryOptimizer(object):
                 )
                 stats['tables'][table[0]] = table[1]
             elif step == 'aggr_no_groupby':
-                total_cost += self.calc_aggregation_cost(stats['tables'], correlation[step], False)
+                total_cost += int(
+                    math.ceil(
+                        outer_table_pages *
+                        self.calc_aggregation_cost(stats['tables'], correlation[step], False)
+                    )
+                )
             elif step == 'aggr_with_groupby':
-                total_cost += self.calc_aggregation_cost(stats['tables'], correlation[step], True)
+                total_cost += int(
+                    math.ceil(
+                        outer_table_pages *
+                        self.calc_aggregation_cost(stats['tables'], correlation[step], True)
+                    )
+                )
         return {'cost': total_cost, 'join_order': join_order}
 
     def _handle_aggregate(self, key, stats, query, group_by):
