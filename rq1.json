@@ -16,14 +16,18 @@
     },
     "selectivity": {
       "default": 0.15,
-      "t2.x2=t3.x3": 0.10,
-      "t3.x3=t2.x2": 0.10,
       "t1.x1=t3.x3": 0.20,
-      "t3.x3=t1.x1": 0.20
+      "t2.x2=temp3.x3": 0.10
     },
     "projectivity": 0.70
   },
-  "steps": {
-
+  "query": {
+    "steps": ["join0", "aggr_with_groupby0", "join1", "join2", "project", "aggr_with_groupby1"],
+    "join0": [["t1", "t3"], "default"],
+    "aggr_with_groupby0": "temp1",
+    "join1": [["t1", "temp2"], "default"],
+    "join2": [["t2", "temp3"], "t2.x2=temp3.x3"],
+    "project": "temp4",
+    "aggr_with_groupby1": "temp5"
   }
 }

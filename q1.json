@@ -38,7 +38,7 @@
   },
   "query": {
     "steps": ["join", "correlate", "aggr_with_groupby"],
-    "join": ["t1", "t2"],
+    "join": [["t1", "t2"], "default"],
     "correlate": {
       "steps": ["join", "project", "aggr_no_groupby"],
       "selectivity": ["t1.x1=t3.x3", "t2.x2=t3.x3"],
