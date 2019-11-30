@@ -17,10 +17,12 @@
 #   2.) As long as the JSON schema is adhered to, this implementation allows for
 #   evaluating arbitrarily nested queries. My initial implementation only handled
 #   a single nested query.
-#   3.)
-#
-#
-#
+#   3.) The result of an aggregate operation are currently not calculated correctly.
+#   Currently aggregate operations do not correctly determine the block size and
+#   tuple size of the resultant table. This should not matter in the long run as the
+#   most costly operation in relational algebra is the join operation which tends
+#   to dominate the other relational algebra operations.
+
 
 import click
 import math, os, sys
@@ -33,7 +35,7 @@ def cost_to_time(cost, avg_seek_time=8, avg_latency=4):
     :param cost: The disk I/O metric to convert.
     :param avg_seek_time: The average seek time in milliseconds.
     :param avg_latency: The average latency in milliseconds.
-    :return: A disk I/O in millisconds.
+    :return: A disk I/O in milliseconds.
     """
     return int(
         math.ceil(
@@ -46,8 +48,7 @@ def cost_to_time(cost, avg_seek_time=8, avg_latency=4):
 
 def create_table(
         name, num_pages, tuple_size, index_type="none", is_sorted=False,
-        clustered=False, clustering_factor=0, primary_index=False
-    ):
+        clustered=False, clustering_factor=0, primary_index=False):
     return (
         name, {
             'num_pages': num_pages,
@@ -142,7 +143,14 @@ def read_query_file(filename):
 
 class QueryPlan(object):
 
-    def __init__(self, query_name, join_methods, join_orders, total_cost, timestamp, has_subquery=False, is_correlated=False):
+    def __init__(self,
+                 query_name,
+                 join_methods,
+                 join_orders,
+                 total_cost,
+                 timestamp,
+                 has_subquery=False,
+                 is_correlated=False):
         if not (isinstance(join_methods, list) and isinstance(join_orders, list)):
             raise ValueError
         if len(join_methods) != len(join_orders):
@@ -241,7 +249,10 @@ class QueryOptimizer(object):
             left_num_pages = left_table['num_pages']
             right_num_pages = right_table['num_pages']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(left_table_name, right_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                left_table_name,
+                right_table_name)
+            )
             sys.exit(-1)
         return cost_to_time(left_num_pages * right_num_pages)
 
@@ -262,15 +273,21 @@ class QueryOptimizer(object):
             right_num_pages = right_table['num_pages']
             right_tuple_size = right_table['tuple_size']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(left_table_name, right_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                left_table_name,
+                right_table_name)
+            )
             sys.exit(-1)
         try:
             left_clustered, right_clustered = left_table['clustered'], right_table['clustered']
-            left_clustering_factor, right_clustering_factor = left_table['clustering_factor'], right_table['clustering_factor']
+            left_clustering_factor, right_clustering_factor = (
+                left_table['clustering_factor'],
+                right_table['clustering_factor']
+            )
             left_index_type, right_index_type = left_table['index_type'], right_table['index_type']
             left_indexed, right_indexed = left_table['indexed'], right_table['indexed']
             left_primary, right_primary = left_table['primary_index'], right_table['primary_index']
-        except:
+        except KeyError:
             left_clustered, right_clustered = False, False
             left_clustering_factor, right_clustering_factor = 0, 0
             left_index_type, right_index_type = None, None
@@ -278,7 +295,12 @@ class QueryOptimizer(object):
             left_primary, right_primary = False, False
         if left_indexed:
             left_tuples_per_page = self.tuples_per_page(left_tuple_size)
-            matching_right_cost = QueryOptimizer.get_matching_cost(right_index_type, right_primary, right_clustered, right_clustering_factor)
+            matching_right_cost = QueryOptimizer.get_matching_cost(
+                right_index_type,
+                right_primary,
+                right_clustered,
+                right_clustering_factor
+            )
             cost = int(
                 math.ceil(
                     left_tuple_size + ((left_tuple_size * left_tuples_per_page) * matching_right_cost)
@@ -286,7 +308,12 @@ class QueryOptimizer(object):
             )
         elif right_indexed:
             right_tuples_per_page = self.tuples_per_page(right_tuple_size)
-            matching_left_cost = QueryOptimizer.get_matching_cost(left_index_type, left_primary, left_clustered, left_clustering_factor)
+            matching_left_cost = QueryOptimizer.get_matching_cost(
+                left_index_type,
+                left_primary,
+                left_clustered,
+                left_clustering_factor
+            )
             cost = int(
                 math.ceil(
                     right_tuple_size + ((right_tuple_size * right_tuples_per_page) * matching_left_cost)
@@ -317,9 +344,12 @@ class QueryOptimizer(object):
             left_num_pages = left_table['num_pages']
             right_num_pages = right_table['num_pages']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(left_table_name,                                                                       right_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                left_table_name,
+                right_table_name)
+            )
             sys.exit(-1)
-        cost= int(
+        cost = int(
             math.ceil(
                 left_num_pages + left_num_pages * right_num_pages
             )
@@ -343,7 +373,10 @@ class QueryOptimizer(object):
             outer_num_pages = outer_table['num_pages']
             inner_num_pages = inner_table['num_pages']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(outer_table_name, inner_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                outer_table_name,
+                inner_table_name)
+            )
             sys.exit(-1)
         outer_blocks = int(
             math.ceil(
@@ -371,7 +404,10 @@ class QueryOptimizer(object):
             inner_num_pages = inner_table['num_pages']
             outer_table_sorted, inner_table_sorted = outer_table['sorted'], inner_table['sorted']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(outer_table_name, inner_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                outer_table_name,
+                inner_table_name)
+            )
             sys.exit(-1)
         max_num_pages = max(outer_num_pages, inner_num_pages)
         if outer_table_sorted and inner_table_sorted:
@@ -408,7 +444,10 @@ class QueryOptimizer(object):
             outer_num_pages = outer_table['num_pages']
             inner_num_pages = inner_table['num_pages']
         except KeyError:
-            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(outer_table_name, inner_table_name))
+            print('KeyError: Table \'{}\' or \'{}\' not found! Cannot continue...'.format(
+                outer_table_name,
+                inner_table_name)
+            )
             sys.exit(-1)
         if block_size > math.sqrt(outer_num_pages):
             cost = 3 * (outer_num_pages + inner_num_pages)
@@ -468,8 +507,6 @@ class QueryOptimizer(object):
             table_name = select['table']
             table = stats[table_name]
             num_pages = table['num_pages']
-            avg_seek_time = stats['avg_seek_time']
-            avg_latency = stats['avg_latency']
         except KeyError as e:
             print('KeyError: Selection expected key {} but not found! Cannot continue...'.format(e))
             sys.exit(-1)
@@ -719,8 +756,14 @@ class QueryOptimizer(object):
 @click.command()
 @click.option('-ps', '--page-size', type=int, default=4096)
 @click.option('-bs', '--block-size', type=int, default=100)
-@click.argument('filepaths', nargs=-1)
+@click.argument('filepaths', nargs=-1, default=['q1.json', 'rq1.json'])
 def main(page_size, block_size, filepaths):
+    """
+    Runs the query optimzer with a preconfigured set of join operations.
+    :param page_size: The page size in bytes.
+    :param block_size: The number of pages per block.
+    :param filepaths: A list containing paths to queries to evaluate -- variadic.
+    """
     qo = QueryOptimizer(page_size, block_size)
     join_scenarios = [
         ["TNJ", qo.calc_tuple_nested_join_cost, None],
@@ -742,4 +785,4 @@ def main(page_size, block_size, filepaths):
 
 
 if __name__ == '__main__':
-    main()
+    main(filepaths=['q1.json', 'rq1.json'])
