@@ -1,51 +1,80 @@
 {
-  "statistics": {
+  "stats": {
+    "avg_seek_time": 8,
+    "avg_latency": 4,
+    "select_rates": {
+      "default": 0.15,
+      "T2.X2=T2.X3": 0.10,
+      "T1.X1=T3.X3": 0.20
+    },
+    "project_rates": {
+      "default": 0.70
+    },
     "tables": {
       "t1": {
         "num_pages": 1000,
         "tuple_size": 20,
-        "indexed": false,
-        "index_type": null,
-        "ikey_type": null,
+        "index_type": "none",
         "clustered": false,
+        "clustering_factor": 0,
+        "primary_index": false,
         "sorted": false
       },
       "t2": {
         "num_pages": 500,
         "tuple_size": 40,
-        "indexed": false,
-        "index_type": null,
-        "ikey_type": null,
+        "index_type": "none",
         "clustered": false,
+        "clustering_factor": 0,
+        "primary_index": false,
         "sorted": false
       },
       "t3": {
         "num_pages": 2000,
         "tuple_size": 100,
-        "indexed": false,
-        "index_type": null,
-        "ikey_type": null,
+        "index_type": "none",
         "clustered": false,
+        "clustering_factor": 0,
+        "primary_index": false,
         "sorted": false
       }
-    },
-    "selectivity": {
-      "default": 0.15,
-      "t2.x2=t3.x3": 0.10,
-      "t1.x1=t3.x3": 0.20
-    },
-    "projectivity": 0.70
+    }
   },
   "query": {
-    "steps": ["join", "correlate", "aggr_with_groupby"],
-    "join": [["t1", "t2"], "default"],
-    "correlate": {
-      "steps": ["join", "project", "aggr_no_groupby"],
-      "selectivity": ["t1.x1=t3.x3", "t2.x2=t3.x3"],
-      "join": ["temp1", "t3"],
-      "project": "temp2",
-      "aggr_no_groupby": "t3"
+    "has_subquery": true,
+    "is_correlated": true,
+    "steps": ["join0", "subquery0", "aggregate0"],
+    "join0": {
+      "tables": ["t1", "t2"],
+      "select_rates": ["default"],
+      "result": "temp0"
     },
-    "aggr_with_groupby": "t2"
+    "subquery0": {
+      "is_correlated": true,
+      "table": "temp3",
+      "steps": ["join0", "project0", "aggregate0"],
+      "join0": {
+        "tables": ["temp0", "t3"],
+        "select_rates": ["T2.X2=T2.X3", "T1.X1=T3.X3"],
+        "result": "temp1"
+      },
+      "project0": {
+        "table": "temp1",
+        "fields": ["*"],
+        "project_rates": ["default"],
+        "result": "temp2"
+      },
+      "aggregate0": {
+        "table": "temp2",
+        "groupby": true,
+        "result": "temp3"
+      },
+      "result": "temp4"
+    },
+    "aggregate0": {
+      "table": "temp4",
+      "groupby": false,
+      "result": "temp5"
+    }
   }
 }
