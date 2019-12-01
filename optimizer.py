@@ -40,8 +40,8 @@ def cost_to_time(cost, avg_seek_time=8, avg_latency=4):
     return int(
         math.ceil(
             cost *
-            (avg_seek_time/1000) *
-            (avg_latency/1000)
+            ((avg_seek_time/1000) +
+            (avg_latency/1000))
         )
     )
 
@@ -72,12 +72,15 @@ def create_timestamp(total_cost):
         raise ValueError
     if total_cost == 0:
         return 0, 0, 0
-    seconds = (total_cost / 1000) % 60
-    seconds = int(seconds)
-    minutes = (total_cost / (1000 * 60)) % 60
-    minutes = int(minutes)
-    hours = (total_cost / (1000 * 60 * 60)) % 24
-    hours = int(hours)
+    milli = total_cost
+    # 3600000 milliseconds in an hour
+    hours = milli // 3600000
+    milli = milli - (3600000 * hours)
+    # 60000 milliseconds in a minute
+    minutes = milli // 60000
+    milli = milli - (60000 * minutes)
+    # 1000 milliseconds in a second
+    seconds = milli // 1000
     return "{:02d}h {:02d}m {:02d}s".format(hours, minutes, seconds)
 
 
@@ -756,7 +759,7 @@ class QueryOptimizer(object):
 @click.command()
 @click.option('-ps', '--page-size', type=int, default=4096)
 @click.option('-bs', '--block-size', type=int, default=100)
-@click.argument('filepaths', nargs=-1, default=['q1.json', 'rq1.json'])
+@click.argument('filepaths', nargs=-1)
 def main(page_size, block_size, filepaths):
     """
     Runs the query optimzer with a preconfigured set of join operations.
@@ -785,4 +788,4 @@ def main(page_size, block_size, filepaths):
 
 
 if __name__ == '__main__':
-    main(filepaths=['q1.json', 'rq1.json'])
+    main()
