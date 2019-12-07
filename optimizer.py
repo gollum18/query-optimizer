@@ -4,16 +4,10 @@
 # Purpose: Implements a simple query optimizer that evaluates SQL-like queries
 # passed in via a conformant JSON format.
 
-# Assumptions:
+# Assumptions and Implementation Decisions:
 #   1.) Disk I/O is converted to milliseconds that is then converted to a
 #   timestamp. There was no unit on the result of converting disk I/O
-#   using the formula (disk I/O * avg_seek_time * avg_latency).
-#   I made the assumption that the resulting unit was in milliseconds and
-#   implemented a timestamp conversion method based around this assumption.
-#   That said, the timestamps reported by this function may be vastly different
-#   than what was expected, but without knowing the unit for the converted disk I/O
-#   nor an algorithm for converting it to a timestamp, I feel this assumption and
-#   resulting output is reasonable.
+#   using the formula (disk I/O * (avg_seek_time + avg_latency)).
 #   2.) As long as the JSON schema is adhered to, this implementation allows for
 #   evaluating arbitrarily nested queries. My initial implementation only handled
 #   a single nested query.
@@ -49,6 +43,29 @@ def cost_to_time(cost, avg_seek_time=8, avg_latency=4):
 def create_table(
         name, num_pages, tuple_size, index_type="none", is_sorted=False,
         clustered=False, clustering_factor=0, primary_index=False):
+    """
+    Creates a table (as a dict) and returns it as a pair where the first
+    element in the pair is the table name and the second element is the
+    table itself.
+    :param name: The name of the table.
+    :param num_pages: The number of pages in the table.
+    :param tuple_size: The tuple size of each record in the table.
+    :param index_type: The index type, one of {'bpt', 'hash', 'none'}.
+    :param is_sorted: Whether the table is sorted.
+    :param clustered: Whether the table index is clustered.
+    :param clustering_factor: The average number of records per cluster.
+    :param primary_index: Whether the index is built on a primary key or
+    not.
+    :return: A pair (name, table) where name is the table name and table
+    is a Python dict containing the following mapping:
+        'num_pages': int
+        'tuple_size': int
+        'index_type': str
+        'sorted': boolean
+        'clustered': boolean
+        'clustering_factor': int
+        'primary_index': boolean
+    """
     return (
         name, {
             'num_pages': num_pages,
@@ -85,25 +102,22 @@ def create_timestamp(total_cost):
 
 
 def permute(items):
-    """Permutes a list of items.
-
-    Arguments:
-        items (list): A list of items to permute.
-
-    Returns:
-        (Generator): A generator that yields permutations of 'items' if 'items'
-        is not empty, otherwise items.
+    """
+    Permutes a list of items.
+    :param items: A list of items to permute.
+    :return: A generator that yields permutations of 'items' if
+    'items' is not empty, otherwise items.
     """
 
     def _permute(_items, _k):
-        """Internal permutation method that implements Heaps' algorithm for
+        """
+        Internal permutation method that implements Heaps' algorithm for
         efficiently generating permutations. Permutations are performed in
         place and yielded as such. Yielded lists should not be modified and
         should be treated as read-only.
-
-        Arguments:
-            _items (list): A list of items to permute.
-            _k (int): The permutation index used to control Heaps' algorithm.
+        :param _items: A list of items to permute.
+        :param _k: The permutation index used to control Heaps' algorithm.
+        :return: A generator that yields permuted lists of items.
         """
         if _k == 1:
             yield _items
@@ -123,14 +137,13 @@ def permute(items):
 
 
 def read_query_file(filename):
-    """Parses a JSON query file and returns the contained JSON as a Python
+    """
+    Parses a JSON query file and returns the contained JSON as a Python
     dictionary.
-
-    Arguments:
-        filename (str): The path to the query file.
-
-    Returns:
-        (dict): A Python dictionary containing contents of the query file.
+    :param filename: The path to the query file.
+    :return: A Python dictionary containing contents of the query file.
+    Mappings are identical to what is described in the project report
+    under the Design section.
     """
     try:
         if not os.path.exists(filename):
@@ -146,14 +159,21 @@ def read_query_file(filename):
 
 class QueryPlan(object):
 
-    def __init__(self,
-                 query_name,
-                 join_methods,
-                 join_orders,
-                 total_cost,
-                 timestamp,
-                 has_subquery=False,
+    def __init__(self, query_name, join_methods, join_orders,
+                 total_cost, timestamp, has_subquery=False,
                  is_correlated=False):
+        """
+        Returns a QueryPlan object.
+        :param query_name: The name of the query.
+        :param join_methods: A list containing join methods.
+        :param join_orders: A list containing lists of join orders.
+        :param total_cost: The total cost of the query in estimated I/O.
+        :param timestamp: The timestamp generated via the create_timestamp
+        method.
+        :param has_subquery: Whether the query has a subquery or not.
+        :param is_correlated: Whether the query contains a correlated
+        subquery.
+        """
         if not (isinstance(join_methods, list) and isinstance(join_orders, list)):
             raise ValueError
         if len(join_methods) != len(join_orders):
@@ -167,6 +187,10 @@ class QueryPlan(object):
         self.timestamp = timestamp
 
     def __str__(self):
+        """
+        Returns a string representation of the query plan.
+        :return: A string representing the query plan.
+        """
         name = "Query: {}\n\t".format(self.query_name)
         subquery = "Has Subquery: {}\n\t".format(self.has_subquery)
         correlated = "Has Correlation: {}\n\t".format(self.is_correlated)
@@ -185,9 +209,9 @@ class QueryOptimizer(object):
 
     def __init__(self, page_size=4096, block_size=100):
         """
-
-        :param page_size:
-        :param block_size:
+        Returns a new instance of a QUeryOptimizer object.
+        :param page_size: The page size (in bytes).
+        :param block_size: The block size (number of records per block).
         """
         self.page_size = page_size
         self.block_size = block_size
@@ -217,10 +241,22 @@ class QueryOptimizer(object):
             del self.join_scenarios[key]
 
     def yield_join_scenarios(self):
+        """
+        Yields join scenarios from the query optimizer.
+        :return: A generator containing join scenarios.
+        """
         yield from self.join_scenarios.items()
 
     @staticmethod
     def get_matching_cost(index_type, primary, clustered, clustering_factor):
+        """
+        Gets the cost of finding a matching keys in the index.
+        :param index_type: The index type, one of {"bpt", "hash", "none"}.
+        :param primary: Whether the index is a primary index or not.
+        :param clustered: Whether the index is clustered or not.
+        :param clustering_factor: The average number of records per cluster.
+        :return: The total cost of finding a matching key in the index.
+        """
         if not primary:
             if clustered:
                 clustered_cost = 1
@@ -239,12 +275,25 @@ class QueryOptimizer(object):
         return index_cost + clustered_cost + 1
 
     def tuples_per_page(self, tuple_size):
+        """
+        Determines the total number of tuples per page.
+        :param tuple_size: The tuple size.
+        :return: The number of tuples per page.
+        """
         if tuple_size == 0:
             return 0
         return int(math.ceil(self.page_size / tuple_size))
 
     @staticmethod
     def calc_cartesian_product(stats, left_table_name, right_table_name):
+        """
+        Determines the total I/O required of a cartesian product between two
+        tables. This method simulates a join operation without any conditions.
+        :param stats: A dictionary containing table statistics.
+        :param left_table_name: The name of the left table.
+        :param right_table_name: The name of the right table.
+        :return: The total I/O required for a cartesian product operation.
+        """
         try:
             tables = stats['tables']
             left_table = tables[left_table_name]
@@ -261,11 +310,11 @@ class QueryOptimizer(object):
 
     def calc_tuple_nested_join_cost(self, stats, left_table_name, right_table_name):
         """
-
-        :param stats:
-        :param left_table_name:
-        :param right_table_name:
-        :return:
+        Determines the total cost to perform a tuple-nested join operation.
+        :param stats: A dictionary containing table statistics.
+        :param left_table_name: The left table name.
+        :param right_table_name: The right table name.
+        :return: The total I/O required to perform a tuple-nested join operation.
         """
         try:
             tables = stats['tables']
@@ -334,11 +383,11 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_page_nested_join_cost(stats, left_table_name, right_table_name):
         """
-
-        :param stats:
-        :param left_table_name:
-        :param right_table_name:
-        :return:
+        Determines the total cost to perform a page nested join operation.
+        :param stats: A dictionary containing table statistics.
+        :param left_table_name: The left table name.
+        :param right_table_name: The right table name.
+        :return: The total I/O cost required to perform a page-nested join operation.
         """
         try:
             tables = stats['tables']
@@ -362,12 +411,12 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_block_nested_join_cost(stats, outer_table_name, inner_table_name, block_size):
         """
-
-        :param stats:
-        :param outer_table_name:
-        :param inner_table_name:
-        :param block_size:
-        :return:
+        Determines the total cost to perform a block-nested join operation.
+        :param stats: A dictionary containing table statistics.
+        :param outer_table_name: The name of the outer table.
+        :param inner_table_name: The name of the inner table.
+        :param block_size: The block size for block-nested join.
+        :return: The total I/O needed to perform a block-nested join operation.
         """
         try:
             tables = stats['tables']
@@ -433,7 +482,7 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_hash_join_cost(stats, outer_table_name, inner_table_name, block_size):
         """
-        Calculates the has join disk I/O cost as time.
+        Calculates the hash join disk I/O cost as time.
         :param stats: A dict containing table stats.
         :param outer_table_name: The outer table name.
         :param inner_table_name: The inner table name.
@@ -472,25 +521,31 @@ class QueryOptimizer(object):
         Calculates the cost for a join operation in disk I/O as time.
         :param stats: A dict containing table stats.
         :param join: The join operation to run.
-        :return: A dict containing the join cost, join order, join method, and join function.
+        :return: A dict containing the join cost in milliseconds, join order,
+        join method, and join function.
         """
-        tables = join['tables']
         best_join_method = None
         best_join_order = None
         best_join_function = None
         best_join_cost = float('inf')
-        for order in permute(tables):
-            for method, value in self.yield_join_scenarios():
-                function, args = value[0], value[1]
-                if args is not None:
-                    temp_cost = function(stats, *tables, *args)
-                else:
-                    temp_cost = function(stats, *tables)
-                if temp_cost < best_join_cost:
-                    best_join_cost = temp_cost
-                    best_join_method = method
-                    best_join_order = order
-                    best_join_function = function
+        tables = join['tables']
+        # cartesian product is selected if no select rates are specified
+        #   no need to perform permutation, the result is the same regardless
+        if not join['select_rates']:
+            return cost_to_time(self.calc_cartesian_product(stats, *tables))
+        else:
+            for order in permute(tables):
+                for method, value in self.yield_join_scenarios():
+                    function, args = value[0], value[1]
+                    if args is not None:
+                        temp_cost = function(stats, *tables, *args)
+                    else:
+                        temp_cost = function(stats, *tables)
+                    if temp_cost < best_join_cost:
+                        best_join_cost = temp_cost
+                        best_join_method = method
+                        best_join_order = order
+                        best_join_function = function
         return {
             "total_cost": cost_to_time(best_join_cost),
             "join_order": best_join_order,
@@ -501,10 +556,10 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_selection_cost(stats, select):
         """
-
-        :param stats:
-        :param select:
-        :return:
+        Determines the total cost of performing a selection operation.
+        :param stats: A dictionary containing table statistics.
+        :param select: The select operation to perform.
+        :return: The total I/O cost in milliseconds for the select operation.
         """
         try:
             table_name = select['table']
@@ -532,10 +587,10 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_projection_cost(stats, project):
         """
-
-        :param stats:
-        :param project:
-        :return:
+        Determines the total I/O cost of performing a projection operation.
+        :param stats: A dictionary containing table statistics.
+        :param project: The project operation to perform.
+        :return: The I/O cost in milliseconds of the project operation.
         """
         try:
             table_name = project['table']
@@ -563,10 +618,10 @@ class QueryOptimizer(object):
     @staticmethod
     def calc_aggregation_cost(stats, aggregate):
         """
-
-        :param stats:
-        :param aggregate
-        :return:
+        Determines the I/O cost of running an aggregation operation.
+        :param stats: A dictionary containing table statistics.
+        :param aggregate: The aggregate operation to perform.
+        :return: The I/O cost in milliseconds of an aggregation operation.
         """
         try:
             table_name = aggregate['table']
@@ -595,9 +650,9 @@ class QueryOptimizer(object):
 
     def calc_best_exec_plan(self, filename):
         """
-
-        :param filename:
-        :return:
+        Determines the best execution plan for a given query.
+        :param filename: The filepath to a supported query file.
+        :return: A QueryPlan object.
         """
         def exec_query(query, is_subquery=False):
             try:
